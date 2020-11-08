@@ -199,7 +199,7 @@ pub struct Queue {
 impl Queue {
     /// Creates a new Queue and default options.
     pub fn new(name: String) -> Self {
-        Self { 
+        Self {
             name,
             ..Default::default()
         }
@@ -231,10 +231,10 @@ impl Queue {
     }
 
     /// Retrieves a routing key, or alternatively an empty string if no exchange is defined.
-    pub fn routing_key(&self) -> &str { 
-        match &self.exchange { 
+    pub fn routing_key(&self) -> &str {
+        match &self.exchange {
             Some(exch) => &exch.routing_key,
-            None => ""
+            None => "",
         }
     }
 }
@@ -256,9 +256,8 @@ impl From<&str> for Queue {
     }
 }
 
-impl Default for Queue { 
-
-    fn default() -> Self { 
+impl Default for Queue {
+    fn default() -> Self {
         let options = QueueDeclareOptions {
             passive: false,
             durable: true,
@@ -267,7 +266,7 @@ impl Default for Queue {
             nowait: false,
         };
         Self {
-            name:"celery".into(),
+            name: "celery".into(),
             options: Some(options),
             exchange: None,
         }
