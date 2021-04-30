@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use lapin::message::Delivery;
 use lapin::options::{
-    BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, BasicQosOptions, QueueDeclareOptions,
+    BasicAckOptions, BasicCancelOptions, BasicConsumeOptions, BasicPublishOptions, BasicQosOptions,
+    QueueDeclareOptions,
 };
 use lapin::types::{AMQPValue, FieldArray, FieldTable};
 use lapin::uri::{self, AMQPUri};
@@ -27,7 +28,7 @@ struct Config {
     heartbeat: Option<u16>,
 }
 
-/// Builds an AMQP broker with a custom configuration.
+/// Builds an [`AMQPBroker`] with a custom configuration.
 pub struct AMQPBrokerBuilder {
     config: Config,
 }
@@ -106,8 +107,7 @@ impl BrokerBuilder for AMQPBrokerBuilder {
             uri,
             conn: Mutex::new(conn),
             consume_channel: RwLock::new(consume_channel),
-            produce_channel: Mutex::new(produce_channel),
-            consume_channel_write_lock: Mutex::new(0),
+            produce_channel: RwLock::new(produce_channel),
             queues: RwLock::new(queues),
             queue_declare_options: queue_options,
             prefetch_count: Mutex::new(self.config.prefetch_count),
@@ -133,18 +133,8 @@ pub struct AMQPBroker {
 
     /// Channel to produce messages from.
     ///
-    /// We wrap it in a Mutex not only for interior mutability, but also to avoid
-    /// race conditions when writing to the channel.
-    produce_channel: Mutex<Channel>,
-
-    /// Like the `produce_channel`, we have to be careful to avoid race conditions
-    /// when writing to the `consume_channel`, like when ack-ing or setting the
-    /// `prefetch_count` (these have to be done through the same channel that consumes
-    /// the messages). But we can't try to acquire a write lock on the `consume_channel`
-    /// itself since the worker that is consuming would always own a read lock, and so we'd
-    /// never be able to acquire a write lock for anything else. Hence we use this dummy
-    /// Mutex that we only try to acquire when writing.
-    consume_channel_write_lock: Mutex<u8>,
+    /// This is only wrapped in RwLock for interior mutability.
+    produce_channel: RwLock<Channel>,
 
     /// Mapping of queue name to Queue struct.
     ///
@@ -161,7 +151,6 @@ pub struct AMQPBroker {
 impl AMQPBroker {
     async fn set_prefetch_count(&self, prefetch_count: u16) -> Result<(), BrokerError> {
         debug!("Setting prefetch count to {}", prefetch_count);
-        let _lock = self.consume_channel_write_lock.lock().await;
         self.consume_channel
             .read()
             .await
@@ -196,7 +185,7 @@ impl Broker for AMQPBroker {
         &self,
         queue: &str,
         error_handler: Box<E>,
-    ) -> Result<Self::DeliveryStream, BrokerError> {
+    ) -> Result<(String, Self::DeliveryStream), BrokerError> {
         self.conn
             .lock()
             .await
@@ -205,7 +194,8 @@ impl Broker for AMQPBroker {
         let queue = queues
             .get(queue)
             .ok_or_else::<BrokerError, _>(|| BrokerError::UnknownQueue(queue.into()))?;
-        self.consume_channel
+        let consumer = self
+            .consume_channel
             .read()
             .await
             .basic_consume(
@@ -214,16 +204,22 @@ impl Broker for AMQPBroker {
                 BasicConsumeOptions::default(),
                 FieldTable::default(),
             )
-            .await
-            .map_err(|e| e.into())
+            .await?;
+        Ok((consumer.tag().to_string(), consumer))
+    }
+
+    async fn cancel(&self, consumer_tag: &str) -> Result<(), BrokerError> {
+        let consume_channel = self.consume_channel.write().await;
+        consume_channel
+            .basic_cancel(consumer_tag, BasicCancelOptions::default())
+            .await?;
+        Ok(())
     }
 
     async fn ack(&self, delivery: &Self::Delivery) -> Result<(), BrokerError> {
-        let _lock = self.consume_channel_write_lock.lock().await;
-        self.consume_channel
-            .read()
-            .await
-            .basic_ack(delivery.1.delivery_tag, BasicAckOptions::default())
+        delivery
+            .1
+            .ack(BasicAckOptions::default())
             .await
             .map_err(|e| e.into())
     }
@@ -257,7 +253,7 @@ impl Broker for AMQPBroker {
 
         let properties = delivery.1.properties.clone().with_headers(headers);
         self.produce_channel
-            .lock()
+            .read()
             .await
             .basic_publish(
                 "",
@@ -275,7 +271,7 @@ impl Broker for AMQPBroker {
         let properties = message.delivery_properties();
         debug!("Sending AMQP message with: {:?}", properties);
         self.produce_channel
-            .lock()
+            .read()
             .await
             .basic_publish(
                 "",
@@ -321,14 +317,25 @@ impl Broker for AMQPBroker {
     }
 
     async fn close(&self) -> Result<(), BrokerError> {
-        // 320 reply-code = "connection-forced", operator intervened.
-        // For reference see https://www.rabbitmq.com/amqp-0-9-1-reference.html#domain.reply-code
-        let _lock = self.consume_channel_write_lock.lock().await;
+        let consume_channel = self.consume_channel.write().await;
+        let produce_channel = self.produce_channel.write().await;
         let conn = self.conn.lock().await;
+
+        if consume_channel.status().connected() {
+            debug!("Closing consumer channel...");
+            consume_channel.close(200, "OK").await?;
+        }
+
+        if produce_channel.status().connected() {
+            debug!("Closing producer channel...");
+            produce_channel.close(200, "OK").await?;
+        }
+
         if conn.status().connected() {
             debug!("Closing connection...");
-            conn.close(320, "").await?;
+            conn.close(200, "OK").await?;
         }
+
         Ok(())
     }
 
@@ -337,15 +344,13 @@ impl Broker for AMQPBroker {
         let mut conn = self.conn.lock().await;
         if !conn.status().connected() {
             debug!("Attempting to reconnect to broker");
-            let _consume_write_lock = self.consume_channel_write_lock.lock().await;
-
             let mut uri = self.uri.clone();
             uri.query.connection_timeout = Some(connection_timeout as u64);
             *conn =
                 Connection::connect_uri(uri, ConnectionProperties::default().with_tokio()).await?;
 
             let mut consume_channel = self.consume_channel.write().await;
-            let mut produce_channel = self.produce_channel.lock().await;
+            let mut produce_channel = self.produce_channel.write().await;
             let mut queues = self.queues.write().await;
 
             *consume_channel = conn.create_channel().await?;
@@ -477,7 +482,7 @@ impl TryDeserializeMessage for Delivery {
             .properties
             .headers()
             .as_ref()
-            .ok_or_else(|| ProtocolError::MissingHeaders)?;
+            .ok_or(ProtocolError::MissingHeaders)?;
         Ok(Message {
             properties: MessageProperties {
                 correlation_id: self
@@ -632,6 +637,7 @@ mod tests {
             redelivered: false,
             properties: message.delivery_properties(),
             data: vec![],
+            acker: Default::default(),
         };
 
         let message2 = delivery.try_deserialize_message();

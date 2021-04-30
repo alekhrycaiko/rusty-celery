@@ -7,21 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-## v0.4.0-rc5 - 2020-10-03
+### Added
+
+- 🚀🚀 Redis broker support 🚀🚀
+- Added the `max_sleep_duration` property on the `Beat` which can be used to ensure that
+  the scheduler backend is called regularly (which may be necessary for custom backends).
+- Added a method `Broker::cancel` to cancel an existing consumer.
+- Changed `Ok` variant type of the the return type of `Broker::consume`. This is now a tuple that includes a unique
+  consumer tag that can then be passed to `Broker::cancel` to cancel the corresponding consumer.
+
+### Fixed
+
+- Fixed a bug with `AMQPBroker::close()` that would result in an error with `lapin`.
+
+## [v0.4.0-rc5](https://github.com/rusty-celery/rusty-celery/releases/tag/v0.4.0-rc5) - 2020-11-19
 
 ### Added
 
-- Added a `Queue` struct for instantiating custom queues.
-- Added an `Exchange` struct for declaring exchanges.
+- Added the `CronSchedule` struct to support Celery's
+  [crontab](https://docs.celeryproject.org/en/stable/reference/celery.schedules.html#celery.schedules.crontab)
+  schedules.
 
 ### Changed
 
+- ⚠️ **BREAKING CHANGE** ⚠️
+
+  To improve the `app!` and `beat!` macros and accomodate custom `Broker`s and `SchedulerBackend`s,
+  we've had to make breaking changes to the way these macros are invoked.
+
+  The biggest change is that the macros now return a future of `Result<Celery>` or `Result<Beat>`.
+  This means you must now call `.await?` on the return value of the macro.
+
+  The other change is that you must now supply the actual `Broker` type.
+  Previously, you could write something like `broker = AMQP { "amqp://my-broker-url" }`,
+  but now you have to write it like `broker = celery::broker::AMQPBroker { "amqp://my-broker-url" }`.
+
+  For a concrete example of these changes, the old way looked like this:
+
+
+  ```rust
+  #[tokio::main]
+  async fn main() -> anyhow::Result<()> {
+      let app = celery::app!(
+          broker = AMQP { "amqp://my-broker-url" },
+          tasks = [add],
+          task_routes = ["*" => "celery"],
+      );
+
+      // ...
+
+      Ok(())
+  }
+  ```
+
+  Whereas now that will look like this:
+
+  ```rust
+  #[tokio::main]
+  async fn main() -> anyhow::Result<()> {
+      let app = celery::app!(
+          broker = celery::broker::AMQPBroker { "amqp://my-broker-url" },
+          tasks = [add],
+          task_routes = ["*" => "celery"],
+      ).await?;
+
+      // ...
+
+      Ok(())
+  }
+  ```
+
+- Celery apps no longer need to have static lifetimes. To remove this constraint, we changed
+  `Celery::consume` to take `&Arc<Self>` instead of a static reference to `self`.
 - Now using `tokio-amqp` internally with `lapin`.
-- Drop explicit dependency on amq-protocol
+- Drop explicit dependency on amq-protocol.
 
 ### Fixed
 
 - Task ID now logged when a beat app sends a task.
+- Fixes to docs. Added a "Build Docs" job to GitHub Actions.
+- Fixed a Celery beat [issue](https://github.com/rusty-celery/rusty-celery/issues/199)
+  that caused a task to be dropped if its scheduled run was delayed
 
 ## v0.4.0-rc4 - 2020-09-16
 

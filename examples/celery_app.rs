@@ -31,7 +31,7 @@ async fn buggy_task() -> TaskResult<()> {
 #[celery::task(max_retries = 2)]
 async fn long_running_task(secs: Option<u64>) {
     let secs = secs.unwrap_or(10);
-    time::delay_for(Duration::from_secs(secs)).await;
+    time::sleep(Duration::from_secs(secs)).await;
 }
 
 // Demonstrates a task that is bound to the task instance, i.e. runs as an instance method.
@@ -58,10 +58,13 @@ enum CeleryOpt {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::from_env(Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+
     let opt = CeleryOpt::from_args();
+
     let my_app = celery::app!(
-        broker = AMQP { std::env::var("AMQP_ADDR").unwrap_or_else(|_| "amqp://127.0.0.1:5672/my_vhost".into()) },
+        // broker = RedisBroker { std::env::var("REDIS_ADDR").unwrap_or_else(|_| "redis://127.0.0.1:6379/".into()) },
+        broker = AMQPBroker { std::env::var("AMQP_ADDR").unwrap_or_else(|_| "amqp://127.0.0.1:5672/my_vhost".into()) },
         tasks = [
             add,
             buggy_task,
@@ -76,7 +79,7 @@ async fn main() -> Result<()> {
         ],
         prefetch_count = 2,
         heartbeat = Some(10),
-    );
+    ).await?;
 
     match opt {
         CeleryOpt::Consume => {
@@ -99,6 +102,12 @@ async fn main() -> Result<()> {
                 my_app
                     .send_task(long_running_task::new(Some(3)).with_time_limit(2))
                     .await?;
+                // Send the long running task that will succeed.
+                for _ in 0..100 {
+                    my_app
+                        .send_task(long_running_task::new(Some(10)).with_time_limit(20))
+                        .await?;
+                }
             } else {
                 for task in tasks {
                     match task.as_str() {
@@ -116,6 +125,5 @@ async fn main() -> Result<()> {
     };
 
     my_app.close().await?;
-
     Ok(())
 }

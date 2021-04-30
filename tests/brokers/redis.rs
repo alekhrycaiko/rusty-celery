@@ -1,7 +1,8 @@
 #![allow(non_upper_case_globals)]
-
+use anyhow::Result;
 use async_trait::async_trait;
-use celery::broker::{AMQPBroker, Broker};
+use celery::broker::Broker;
+use celery::broker::RedisBroker;
 use celery::error::TaskError;
 use celery::task::{Request, Signature, Task, TaskOptions};
 use once_cell::sync::Lazy;
@@ -64,24 +65,28 @@ impl Task for add {
 }
 
 #[tokio::test]
-async fn test_amqp_broker() {
+async fn test_redis_broker() -> Result<()> {
+    println!("Starting broker");
     let my_app = celery::app!(
-        broker = AMQPBroker { std::env::var("AMQP_ADDR").unwrap_or_else(|_| "amqp://127.0.0.1:5672/my_vhost".into()) },
+        broker = RedisBroker { std::env::var("REDIS_ADDR").unwrap_or_else(|_| "redis://127.0.0.1:6379/".into()) },
         tasks = [add],
         task_routes = [
             "add" => "celery",
             "backend.*" => "backend",
             "ml.*" => "ml"
         ],
-    ).await.unwrap();
-
+        prefetch_count = 2
+    ).await?;
+    println!("Initialized broker");
     // Send task to queue.
     let send_result = my_app.send_task(add::new(1, 2)).await;
     assert!(send_result.is_ok());
+    println!("Sent task");
     let task_id_1 = send_result.unwrap().task_id;
 
     // Consume task from queue. We wrap this in `time::timeout(...)` because otherwise
     // `consume` will keep waiting for more tasks indefinitely.
+    println!("Awaiting result");
     let result = time::timeout(Duration::from_secs(1), my_app.consume()).await;
 
     // `result` should be a timeout error, otherwise `consume` ended early which means
@@ -89,7 +94,12 @@ async fn test_amqp_broker() {
     assert!(result.is_err());
 
     // Try closing connection and then reconnecting.
+    println!("Close broker");
     my_app.broker.close().await.unwrap();
+    // Assert connection actually closed.
+    let res = my_app.send_task(add::new(1, 2)).await;
+    assert!(res.is_err());
+    println!("reconnect");
     my_app.broker.reconnect(5).await.unwrap();
 
     // Send another task to the queue.
@@ -109,4 +119,5 @@ async fn test_amqp_broker() {
     assert_eq!(successes[&task_id_1].as_ref().unwrap(), &3);
     assert!(successes[&task_id_2].is_ok());
     assert_eq!(successes[&task_id_2].as_ref().unwrap(), &4);
+    Ok(())
 }

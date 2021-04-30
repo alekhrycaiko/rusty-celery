@@ -51,6 +51,11 @@ pub enum BeatError {
     ProtocolError(#[from] ProtocolError),
 }
 
+/// Error that can occur while creating a cron schedule.
+#[derive(Error, Debug)]
+#[error("invalid cron schedule: {0}")]
+pub struct CronScheduleError(pub String);
+
 /// Errors that can occur at the task level.
 #[derive(Error, Debug)]
 pub enum TaskError {
@@ -129,12 +134,24 @@ pub enum BrokerError {
     NotConnected,
 
     /// Any IO error that could occur.
-    #[error("IO error")]
+    #[error("IO error \"{0}\"")]
     IoError(#[from] std::io::Error),
 
+    /// Deserilize error
+    #[error("Deserialize error \"{0}\"")]
+    DeserializeError(#[from] serde_json::Error),
+
+    /// Protocol error
+    #[error("Protocol error \"{0}\"")]
+    ProtocolError(#[from] ProtocolError),
+
     /// Any other AMQP error that could happen.
-    #[error("AMQP error")]
+    #[error("AMQP error \"{0}\"")]
     AMQPError(#[from] lapin::Error),
+
+    /// Any other Redis error that could happen.
+    #[error("Redis error \"{0}\"")]
+    RedisError(#[from] redis::RedisError),
 }
 
 impl BrokerError {
@@ -147,6 +164,9 @@ impl BrokerError {
                 lapin::Error::InvalidChannelState(_) => true,
                 _ => false,
             },
+            BrokerError::RedisError(err) => {
+                err.is_connection_dropped() || err.is_connection_refusal()
+            }
             _ => false,
         }
     }
