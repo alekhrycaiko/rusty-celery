@@ -1,9 +1,8 @@
 //! Defines the Celery protocol.
 //!
-//! The top part of the protocol is the [`Message` struct](struct.Message.html), which builds on
-//! top of the protocol for a broker. This is why a broker's [delivery
-//! type](../broker/trait.Broker.html#associatedtype.Delivery) must implement
-//! [`TryCreateMessage`](trait.TryCreateMessage.html).
+//! The top part of the protocol is the [`Message`] struct, which builds on
+//! top of the protocol for a broker. This is why a broker's [`Delivery`](crate::broker::Broker::Delivery)
+//! type must implement [`TryCreateMessage`].
 
 use chrono::{DateTime, Duration, Utc};
 use log::{debug, warn};
@@ -151,10 +150,10 @@ where
     }
 }
 
-/// A `Message` is the core of the Celery protocol and is built on top of a `Broker`'s protocol.
+/// A [`Message`] is the core of the Celery protocol and is built on top of a [`Broker`](crate::broker::Broker)'s protocol.
 /// Every message corresponds to a task.
 ///
-/// Note that the `raw_body` field is the serialized form of a [`MessageBody`](struct.MessageBody.html)
+/// Note that the [`raw_body`](Message::raw_body) field is the serialized form of a [`MessageBody`]
 /// so that a worker can read the meta data of a message without having to deserialize the body
 /// first.
 #[derive(Eq, PartialEq, Debug, Clone)]
@@ -165,7 +164,7 @@ pub struct Message {
     /// Message headers contain additional meta data pertaining to the Celery protocol.
     pub headers: MessageHeaders,
 
-    /// A serialized [`MessageBody`](struct.MessageBody.html).
+    /// A serialized [`MessageBody`].
     pub raw_body: Vec<u8>,
 }
 
@@ -332,6 +331,58 @@ impl Message {
     pub fn task_id(&self) -> &str {
         &self.headers.id
     }
+
+    pub fn json_serialized(&self) -> Result<Vec<u8>, serde_json::error::Error> {
+        use serde_json::{json, value::Value};
+
+        let root_id = match &self.headers.root_id {
+            Some(root_id) => json!(root_id.clone()),
+            None => Value::Null,
+        };
+        let reply_to = match &self.properties.reply_to {
+            Some(reply_to) => json!(reply_to.clone()),
+            None => Value::Null,
+        };
+        let eta = match self.headers.eta {
+            Some(time) => json!(time.to_rfc3339()),
+            None => Value::Null,
+        };
+        let expires = match self.headers.expires {
+            Some(time) => json!(time.to_rfc3339()),
+            None => Value::Null,
+        };
+        let mut buffer = Uuid::encode_buffer();
+        let uuid = Uuid::new_v4().to_hyphenated().encode_lower(&mut buffer);
+        let delivery_tag = uuid.to_owned();
+        let msg_json_value = json!({
+            "body": self.raw_body.clone(),
+            "content_encoding": self.properties.content_encoding.clone(),
+            "content_type": self.properties.content_type.clone(),
+            "correlation_id": self.properties.correlation_id.clone(),
+            "reply_to": reply_to,
+            "delivery_tag": delivery_tag,
+            "headers": {
+                "id": self.headers.id.clone(),
+                "task": self.headers.task.clone(),
+                "lang": self.headers.lang.clone(),
+                "root_id": root_id,
+                "parent_id": self.headers.parent_id.clone(),
+                "group": self.headers.group.clone(),
+                "meth": self.headers.meth.clone(),
+                "shadow": self.headers.shadow.clone(),
+                "eta": eta,
+                "expires": expires,
+                "retries": self.headers.retries.clone(),
+                "timelimit": self.headers.timelimit.clone(),
+                "argsrepr": self.headers.argsrepr.clone(),
+                "kwargsrepr": self.headers.kwargsrepr.clone(),
+                "origin": self.headers.origin.clone()
+            }
+        });
+        let res = serde_json::to_string(&msg_json_value)?;
+        Ok(res.into_bytes())
+        // Ok(res.bytes())
+    }
 }
 
 impl<T> TryFrom<Signature<T>> for Message
@@ -340,7 +391,7 @@ where
 {
     type Error = ProtocolError;
 
-    /// Get a new `MessageBuilder` from a task signature.
+    /// Get a new [`MessageBuilder`] from a task signature.
     fn try_from(mut task_sig: Signature<T>) -> Result<Self, Self::Error> {
         // Create random correlation id.
         let mut buffer = Uuid::encode_buffer();
@@ -392,8 +443,9 @@ where
     }
 }
 
-/// A trait for attempting to create a `Message` from `self`. This will be implemented
-/// by types that can act like message "factories", like for instance the `Signature` type.
+/// A trait for attempting to create a [`Message`] from `self`. This will be implemented
+/// by types that can act like message "factories", like for instance the
+/// [`Signature`](crate::task::Signature) type.
 pub trait TryCreateMessage {
     fn try_create_message(&self) -> Result<Message, ProtocolError>;
 }
@@ -403,14 +455,14 @@ where
     T: Task + Clone,
 {
     /// Creating a message from a signature without consuming the signature requires cloning it.
-    /// For one-shot conversions, directly use `Message::try_from` instead.
+    /// For one-shot conversions, directly use [`Message::try_from`] instead.
     fn try_create_message(&self) -> Result<Message, ProtocolError> {
         Message::try_from(self.clone())
     }
 }
 
-/// A trait for attempting to deserialize a `Message` from `self`. This is required to be implemented
-/// on a broker's `Delivery` type.
+/// A trait for attempting to deserialize a [`Message`] from `self`. This is required to be implemented
+/// on a broker's [`Delivery`](crate::broker::Broker::Delivery) type.
 pub trait TryDeserializeMessage {
     fn try_deserialize_message(&self) -> Result<Message, ProtocolError>;
 }
@@ -418,7 +470,7 @@ pub trait TryDeserializeMessage {
 /// Message meta data pertaining to the broker.
 #[derive(Eq, PartialEq, Debug, Clone)]
 pub struct MessageProperties {
-    /// A unique ID associated with the task, usually the same as `MessageHeaders::id`.
+    /// A unique ID associated with the task, usually the same as [`MessageHeaders::id`].
     pub correlation_id: String,
 
     /// The MIME type of the body.
@@ -524,6 +576,67 @@ pub struct MessageBodyEmbed {
     /// The serialized signature of the chord callback.
     #[serde(default)]
     pub chord: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeliveryHeaders {
+    pub id: String,
+    pub task: String,
+    pub lang: Option<String>,
+    pub root_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub group: Option<String>,
+    pub meth: Option<String>,
+    pub shadow: Option<String>,
+    pub eta: Option<DateTime<Utc>>,
+    pub expires: Option<DateTime<Utc>>,
+    pub retries: Option<u32>,
+    pub timelimit: (Option<u32>, Option<u32>),
+    pub argsrepr: Option<String>,
+    pub kwargsrepr: Option<String>,
+    pub origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Delivery {
+    pub body: Vec<u8>,
+    pub content_encoding: String,
+    pub content_type: String,
+    pub correlation_id: String,
+    pub reply_to: Option<String>,
+    pub delivery_tag: String,
+    pub headers: DeliveryHeaders,
+}
+
+impl Delivery {
+    pub fn try_deserialize_message(&self) -> Result<Message, ProtocolError> {
+        Ok(Message {
+            properties: MessageProperties {
+                correlation_id: self.correlation_id.clone(),
+                content_type: self.content_type.clone(),
+                content_encoding: self.content_encoding.clone(),
+                reply_to: self.reply_to.clone(),
+            },
+            headers: MessageHeaders {
+                id: self.headers.id.clone(),
+                task: self.headers.task.clone(),
+                lang: self.headers.lang.clone(),
+                root_id: self.headers.root_id.clone(),
+                parent_id: self.headers.parent_id.clone(),
+                group: self.headers.group.clone(),
+                meth: self.headers.meth.clone(),
+                shadow: self.headers.shadow.clone(),
+                eta: self.headers.eta,
+                expires: self.headers.expires,
+                retries: self.headers.retries,
+                timelimit: self.headers.timelimit,
+                argsrepr: self.headers.argsrepr.clone(),
+                kwargsrepr: self.headers.kwargsrepr.clone(),
+                origin: self.headers.origin.clone(),
+            },
+            raw_body: self.body.clone(),
+        })
+    }
 }
 
 #[cfg(test)]

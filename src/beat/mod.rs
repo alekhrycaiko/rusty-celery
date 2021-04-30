@@ -1,4 +1,4 @@
-//! Celery beat is an app that can automatically produce tasks at scheduled times.
+//! Celery [`Beat`] is an app that can automatically produce tasks at scheduled times.
 //!
 //! ### Terminology
 //!
@@ -39,7 +39,7 @@ mod backend;
 pub use backend::{LocalSchedulerBackend, SchedulerBackend};
 
 mod schedule;
-pub use schedule::{RegularSchedule, Schedule};
+pub use schedule::{CronSchedule, RegularSchedule, Schedule};
 
 mod scheduled_task;
 pub use scheduled_task::ScheduledTask;
@@ -57,9 +57,10 @@ where
     default_queue: String,
     task_routes: Vec<(String, String)>,
     task_options: TaskOptions,
+    max_sleep_duration: Option<Duration>,
 }
 
-/// Used to create a `Beat` app with a custom configuration.
+/// Used to create a [`Beat`] app with a custom configuration.
 pub struct BeatBuilder<Bb, Sb>
 where
     Bb: BrokerBuilder,
@@ -87,6 +88,7 @@ where
                 default_queue: "celery".into(),
                 task_routes: vec![],
                 task_options: TaskOptions::default(),
+                max_sleep_duration: None,
             },
             scheduler_backend: LocalSchedulerBackend::new(),
         }
@@ -116,6 +118,7 @@ where
                 default_queue: "celery".into(),
                 task_routes: vec![],
                 task_options: TaskOptions::default(),
+                max_sleep_duration: None,
             },
             scheduler_backend,
         }
@@ -170,6 +173,14 @@ where
         self
     }
 
+    /// Set a maximum sleep duration, which limits the amount of time that
+    /// can pass between ticks. This is useful to ensure that the scheduler backend
+    /// implementation is called regularly.
+    pub fn max_sleep_duration(mut self, max_sleep_duration: Duration) -> Self {
+        self.config.max_sleep_duration = Some(max_sleep_duration);
+        self
+    }
+
     /// Construct a `Beat` app with the current configuration.
     pub async fn build(self) -> Result<Beat<Bb::Broker, Sb>, CeleryError> {
         // Declare default queue to broker.
@@ -206,19 +217,21 @@ where
             broker_connection_retry: self.config.broker_connection_retry,
             broker_connection_max_retries: self.config.broker_connection_max_retries,
             broker_connection_retry_delay: self.config.broker_connection_retry_delay,
+            max_sleep_duration: self.config.max_sleep_duration,
         })
     }
 }
 
-/// A `Beat` app is used to send out scheduled tasks. This is the struct that is
-/// created with the [`beat`](../macro.beat.html) macro.
+/// A [`Beat`] app is used to send out scheduled tasks. This is the struct that is
+/// created with the [`beat!`] macro.
 ///
 /// It drives execution by making the internal scheduler "tick", and updates the list of scheduled
 /// tasks through a customizable scheduler backend.
 pub struct Beat<Br: Broker, Sb: SchedulerBackend> {
     pub name: String,
-    scheduler: Scheduler<Br>,
-    scheduler_backend: Sb,
+    pub scheduler: Scheduler<Br>,
+    pub scheduler_backend: Sb,
+
     task_routes: Vec<Rule>,
     default_queue: String,
     task_options: TaskOptions,
@@ -227,6 +240,8 @@ pub struct Beat<Br: Broker, Sb: SchedulerBackend> {
     broker_connection_retry: bool,
     broker_connection_max_retries: u32,
     broker_connection_retry_delay: u32,
+
+    max_sleep_duration: Option<Duration>,
 }
 
 impl<Br> Beat<Br, LocalSchedulerBackend>
@@ -314,7 +329,7 @@ where
             let mut reconnect_successful: bool = false;
             for _ in 0..self.broker_connection_max_retries {
                 info!("Trying to re-establish connection with broker");
-                time::delay_for(Duration::from_secs(
+                time::sleep(Duration::from_secs(
                     self.broker_connection_retry_delay as u64,
                 ))
                 .await;
@@ -359,8 +374,12 @@ where
                 let sleep_interval = next_tick_at.duration_since(now).expect(
                     "Unexpected error when unwrapping a SystemTime comparison that is not supposed to fail",
                 );
+                let sleep_interval = match &self.max_sleep_duration {
+                    Some(max_sleep_duration) => std::cmp::min(sleep_interval, *max_sleep_duration),
+                    None => sleep_interval,
+                };
                 debug!("Now sleeping for {:?}", sleep_interval);
-                time::delay_for(sleep_interval).await;
+                time::sleep(sleep_interval).await;
             }
         }
     }
