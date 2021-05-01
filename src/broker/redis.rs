@@ -1,6 +1,7 @@
 //! Redis broker.
 #![allow(dead_code)]
 use super::{Broker, BrokerBuilder};
+use crate::broker::Queue;
 use crate::error::{BrokerError, ProtocolError};
 use crate::protocol::Delivery;
 use crate::protocol::Message;
@@ -57,8 +58,8 @@ impl BrokerBuilder for RedisBrokerBuilder {
     }
 
     /// Declare a queue.
-    fn declare_queue(mut self, name: &str) -> Self {
-        self.config.queues.insert(name.into());
+    fn declare_queue(mut self, queue: Queue) -> Self {
+        self.config.queues.insert(queue.name);
         self
     }
 
