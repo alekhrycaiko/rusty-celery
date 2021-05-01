@@ -4,12 +4,6 @@
 /// Errors in the order of 1-2 milliseconds are expected, so checks
 /// are written to have a tolerance of at least 10 milliseconds.
 use super::*;
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use futures::Stream;
-
-use crate::broker::Queue;
-use crate::error::{BrokerError, ProtocolError};
 use crate::{
     broker::mock::*,
     task::{Request, TaskOptions, TaskResult},
@@ -323,5 +317,3 @@ impl Task for DummyTask2 {
         unimplemented!()
     }
 }
-
-

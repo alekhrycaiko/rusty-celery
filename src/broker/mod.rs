@@ -1,19 +1,19 @@
 //! The broker is an integral part of a [`Celery`](crate::Celery) app. It provides the transport for messages that
 //! encode tasks.
 
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use futures::Stream;
+use log::error;
+use tokio::time::{self, Duration};
 use crate::error::{BrokerError, CeleryError};
 use crate::{
     protocol::{Message, TryDeserializeMessage},
     routing::Rule,
 };
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use futures::Stream;
 use lapin::options::{ExchangeDeclareOptions, QueueDeclareOptions};
 use lapin::types::FieldTable;
 use lapin::{Channel, ExchangeKind};
-use log::error;
-use tokio::time::{self, Duration};
 mod amqp;
 mod redis;
 pub use self::redis::{RedisBroker, RedisBrokerBuilder};
